@@ -3,7 +3,7 @@ package caddyminify
 import (
 	"bytes"
 	"net/http"
-	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/caddyserver/caddy/v2"
@@ -35,45 +35,40 @@ func (*Handler) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
+type responseMinifier struct {
+	*caddyhttp.ResponseWriterWrapper
+	handler *Handler
+}
+
+func (fw *responseMinifier) WriteHeader(status int) {
+	// we don't know the length after replacements since
+	// we're not buffering it all to find out
+	fw.Header().Del("Content-Length")
+
+	fw.ResponseWriterWrapper.WriteHeader(status)
+}
+
+func (fw *responseMinifier) Write(d []byte) (int, error) {
+	var mediatype = fw.ResponseWriter.Header().Get("Content-Type")
+
+	if strings.HasPrefix(mediatype, "text/html") {
+		writer := fw.handler.minifier.Writer(mediatype, fw.ResponseWriter)
+
+		defer writer.Close()
+
+		return writer.Write(d)
+	}
+
+	return fw.ResponseWriter.Write(d)
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	resBuffer := bufferPool.Get().(*bytes.Buffer)
-	resBuffer.Reset()
-	defer bufferPool.Put(resBuffer)
-
-	shouldBuffer := func(_ int, _ http.Header) bool { return true }
-	recorder := caddyhttp.NewResponseRecorder(w, resBuffer, shouldBuffer)
-
-	err := next.ServeHTTP(recorder, r)
-	if err != nil {
-		return err
+	fw := &responseMinifier{
+		ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
+		handler:               h,
 	}
 
-	if resBuffer.Len() < 1 {
-		w.WriteHeader(recorder.Status())
-		return nil
-	}
-
-	if recorder.Header().Get("Content-Encoding") != "" {
-		w.WriteHeader(recorder.Status())
-		_, err = w.Write(resBuffer.Bytes())
-		return err
-	}
-
-	result := &bytes.Buffer{}
-	contentType := recorder.Header().Get("Content-Type")
-
-	err = h.minifier.Minify(contentType, result, resBuffer)
-	if err != nil {
-		w.WriteHeader(recorder.Status())
-		_, err = w.Write(resBuffer.Bytes())
-		return err
-	}
-
-	w.Header().Set("Content-Length", strconv.Itoa(result.Len()))
-	w.WriteHeader(recorder.Status())
-	_, err = w.Write(result.Bytes())
-
-	return err
+	return next.ServeHTTP(fw, r)
 }
 
 func (h *Handler) Provision(_ caddy.Context) error {
