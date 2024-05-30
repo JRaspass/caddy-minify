@@ -3,7 +3,7 @@ module github.com/JRaspass/caddy-minify
 go 1.22.0
 
 require (
-	github.com/caddyserver/caddy/v2 v2.8.0
+	github.com/caddyserver/caddy/v2 v2.8.1
 	github.com/tdewolff/minify/v2 v2.20.32
 )
 
