@@ -15,12 +15,20 @@ import (
 	"github.com/tdewolff/minify/v2/svg"
 )
 
+// Interface guards
+var (
+	_ caddy.Module                = (*Middleware)(nil)
+	_ caddy.Provisioner           = (*Middleware)(nil)
+	_ caddyhttp.MiddlewareHandler = (*Middleware)(nil)
+	_ caddyfile.Unmarshaler       = (*Middleware)(nil)
+)
+
+type Middleware struct{ minify *minify.M }
+
 func init() {
 	caddy.RegisterModule(new(Middleware))
 	httpcaddyfile.RegisterHandlerDirective("minify", parseCaddyfileHandler)
 }
-
-type Middleware struct{ minifier *minify.M }
 
 func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	m := new(Middleware)
@@ -35,11 +43,11 @@ func (*Middleware) CaddyModule() caddy.ModuleInfo {
 }
 
 func (m *Middleware) Provision(_ caddy.Context) error {
-	m.minifier = minify.New()
+	m.minify = minify.New()
 
-	m.minifier.AddFunc("text/html", html.Minify)
-	m.minifier.AddFunc("application/json", json.Minify)
-	m.minifier.AddFunc("image/svg+xml", svg.Minify)
+	m.minify.AddFunc("text/html", html.Minify)
+	m.minify.AddFunc("application/json", json.Minify)
+	m.minify.AddFunc("image/svg+xml", svg.Minify)
 
 	return nil
 }
@@ -63,14 +71,14 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 	// Early-exit if the body isn't HTML.
 	mediaType := rec.Header().Get("Content-Type")
-	_, params, minifier := m.minifier.Match(mediaType)
+	_, params, minifier := m.minify.Match(mediaType)
 	if minifier == nil {
 		return rec.WriteResponse()
 	}
 
 	// Minify the body.
 	var result bytes.Buffer
-	if err := minifier(m.minifier, &result, buf, params); err != nil {
+	if err := minifier(m.minify, &result, buf, params); err != nil {
 		return err
 	}
 
@@ -91,11 +99,3 @@ func (*Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 	return nil
 }
-
-// Interface guards
-var (
-	_ caddy.Module                = (*Middleware)(nil)
-	_ caddy.Provisioner           = (*Middleware)(nil)
-	_ caddyhttp.MiddlewareHandler = (*Middleware)(nil)
-	_ caddyfile.Unmarshaler       = (*Middleware)(nil)
-)
