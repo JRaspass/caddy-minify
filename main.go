@@ -1,12 +1,11 @@
 package caddyminify
 
 import (
-	"bytes"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/tdewolff/minify/v2"
@@ -15,29 +14,58 @@ import (
 	"github.com/tdewolff/minify/v2/svg"
 )
 
-var bufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
-
-type Handler struct{ minifier *minify.M }
-
 func init() {
-	caddy.RegisterModule(new(Handler))
-	httpcaddyfile.RegisterHandlerDirective("minify", setup)
+	caddy.RegisterModule(new(Middleware))
+	httpcaddyfile.RegisterHandlerDirective("minify", parseCaddyfileHandler)
 }
 
-func setup(_ httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
-	return new(Handler), nil
+type Middleware struct{ minifier *minify.M }
+
+func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+	m := new(Middleware)
+	return m, m.UnmarshalCaddyfile(h.Dispenser)
 }
 
-func (*Handler) CaddyModule() caddy.ModuleInfo {
+func (*Middleware) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.minify",
-		New: func() caddy.Module { return new(Handler) },
+		New: func() caddy.Module { return new(Middleware) },
 	}
+}
+
+func (m *Middleware) Provision(_ caddy.Context) error {
+	m.minifier = minify.New()
+
+	m.minifier.AddFunc("text/html", html.Minify)
+	m.minifier.AddFunc("application/json", json.Minify)
+	m.minifier.AddFunc("image/svg+xml", svg.Minify)
+
+	return nil
+}
+
+func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	fw := &responseMinifier{
+		ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
+		minifier:              m.minifier,
+	}
+
+	return next.ServeHTTP(fw, r)
+}
+
+func (*Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	d.Next() // Consume directive name.
+
+	// There should be no more arguments.
+	if d.NextArg() {
+		return d.ArgErr()
+	}
+
+	return nil
 }
 
 type responseMinifier struct {
 	*caddyhttp.ResponseWriterWrapper
-	handler *Handler
+	minifier *minify.M
 }
 
 func (fw *responseMinifier) WriteHeader(status int) {
@@ -52,7 +80,7 @@ func (fw *responseMinifier) Write(d []byte) (int, error) {
 	var mediatype = fw.ResponseWriter.Header().Get("Content-Type")
 
 	if strings.HasPrefix(mediatype, "text/html") {
-		writer := fw.handler.minifier.Writer(mediatype, fw.ResponseWriter)
+		writer := fw.minifier.Writer(mediatype, fw.ResponseWriter)
 
 		defer writer.Close()
 
@@ -62,24 +90,11 @@ func (fw *responseMinifier) Write(d []byte) (int, error) {
 	return fw.ResponseWriter.Write(d)
 }
 
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	fw := &responseMinifier{
-		ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
-		handler:               h,
-	}
-
-	return next.ServeHTTP(fw, r)
-}
-
-func (h *Handler) Provision(_ caddy.Context) error {
-	h.minifier = minify.New()
-
-	h.minifier.AddFunc("text/html", html.Minify)
-	h.minifier.AddFunc("application/json", json.Minify)
-	h.minifier.AddFunc("image/svg+xml", svg.Minify)
-
-	return nil
-}
-
-var _ caddy.Provisioner = (*Handler)(nil)
-var _ caddyhttp.MiddlewareHandler = (*Handler)(nil)
+// Interface guards
+var (
+	_ caddy.Module                = (*Middleware)(nil)
+	_ caddy.Provisioner           = (*Middleware)(nil)
+	_ caddyhttp.MiddlewareHandler = (*Middleware)(nil)
+	_ caddyfile.Unmarshaler       = (*Middleware)(nil)
+	_ http.ResponseWriter         = (*responseMinifier)(nil)
+)
