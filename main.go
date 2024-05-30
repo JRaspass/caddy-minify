@@ -3,7 +3,6 @@ package caddyminify
 import (
 	"bytes"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/caddyserver/caddy/v2"
@@ -64,13 +63,14 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 	// Early-exit if the body isn't HTML.
 	mediaType := rec.Header().Get("Content-Type")
-	if !strings.HasPrefix(mediaType, "text/html") {
+	_, params, minifier := m.minifier.Match(mediaType)
+	if minifier == nil {
 		return rec.WriteResponse()
 	}
 
 	// Minify the body.
 	var result bytes.Buffer
-	if err := m.minifier.Minify(mediaType, &result, buf); err != nil {
+	if err := minifier(m.minifier, &result, buf, params); err != nil {
 		return err
 	}
 
