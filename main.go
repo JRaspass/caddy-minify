@@ -3,7 +3,7 @@ package caddyminify
 import (
 	"bytes"
 	"net/http"
-	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/caddyserver/caddy/v2"
@@ -48,34 +48,36 @@ func (m *Middleware) Provision(_ caddy.Context) error {
 var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	// get a buffer to hold the response body
+	// Get a buffer to hold the response body.
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer bufPool.Put(buf)
 
-	// set up the response recorder
+	// Set up the response recorder.
 	shouldBuf := func(int, http.Header) bool { return true }
 	rec := caddyhttp.NewResponseRecorder(w, buf, shouldBuf)
 
-	// collect the response from upstream
+	// Collect the response from upstream.
 	if err := next.ServeHTTP(rec, r); err != nil {
 		return err
 	}
 
-	/*var result bytes.Buffer
+	// Early-exit if the body isn't HTML.
 	mediaType := rec.Header().Get("Content-Type")
+	if !strings.HasPrefix(mediaType, "text/html") {
+		return rec.WriteResponse()
+	}
+
+	// Minify the body.
+	var result bytes.Buffer
 	if err := m.minifier.Minify(mediaType, &result, buf); err != nil {
 		return err
-	}*/
+	}
 
-	result := buf
-
-	w.Header().Set("X-Raz", strconv.Itoa(result.Len()))
-
-	w.Header().Set("Content-Length", strconv.Itoa(result.Len()))
+	// Write out the shorter body.
+	w.Header().Del("Content-Length")
 	w.WriteHeader(rec.Status())
 	_, err := w.Write(result.Bytes())
-
 	return err
 }
 
