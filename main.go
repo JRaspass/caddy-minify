@@ -1,8 +1,10 @@
 package caddyminify
 
 import (
+	"bytes"
 	"net/http"
-	"strings"
+	"strconv"
+	"sync"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -43,13 +45,34 @@ func (m *Middleware) Provision(_ caddy.Context) error {
 	return nil
 }
 
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	fw := &responseMinifier{
-		ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
-		minifier:              m.minifier,
+	// get a buffer to hold the response body
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	// set up the response recorder
+	shouldBuf := func(int, http.Header) bool { return true }
+	rec := caddyhttp.NewResponseRecorder(w, buf, shouldBuf)
+
+	// collect the response from upstream
+	if err := next.ServeHTTP(rec, r); err != nil {
+		return err
 	}
 
-	return next.ServeHTTP(fw, r)
+	var result bytes.Buffer
+	mediaType := rec.Header().Get("Content-Type")
+	if err := m.minifier.Minify(mediaType, &result, buf); err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Length", strconv.Itoa(result.Len()))
+	w.WriteHeader(rec.Status())
+	_, err := w.Write(result.Bytes())
+
+	return err
 }
 
 func (*Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -63,38 +86,10 @@ func (*Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-type responseMinifier struct {
-	*caddyhttp.ResponseWriterWrapper
-	minifier *minify.M
-}
-
-func (fw *responseMinifier) WriteHeader(status int) {
-	// we don't know the length after replacements since
-	// we're not buffering it all to find out
-	fw.Header().Del("Content-Length")
-
-	fw.ResponseWriterWrapper.WriteHeader(status)
-}
-
-func (fw *responseMinifier) Write(d []byte) (int, error) {
-	var mediatype = fw.ResponseWriter.Header().Get("Content-Type")
-
-	if strings.HasPrefix(mediatype, "text/html") {
-		writer := fw.minifier.Writer(mediatype, fw.ResponseWriter)
-
-		defer writer.Close()
-
-		return writer.Write(d)
-	}
-
-	return fw.ResponseWriter.Write(d)
-}
-
 // Interface guards
 var (
 	_ caddy.Module                = (*Middleware)(nil)
 	_ caddy.Provisioner           = (*Middleware)(nil)
 	_ caddyhttp.MiddlewareHandler = (*Middleware)(nil)
 	_ caddyfile.Unmarshaler       = (*Middleware)(nil)
-	_ http.ResponseWriter         = (*responseMinifier)(nil)
 )
