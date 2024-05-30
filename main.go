@@ -62,11 +62,15 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		return err
 	}
 
-	var result bytes.Buffer
+	/*var result bytes.Buffer
 	mediaType := rec.Header().Get("Content-Type")
 	if err := m.minifier.Minify(mediaType, &result, buf); err != nil {
 		return err
-	}
+	}*/
+
+	result := buf
+
+	w.Header().Set("X-Raz", strconv.Itoa(result.Len()))
 
 	w.Header().Set("Content-Length", strconv.Itoa(result.Len()))
 	w.WriteHeader(rec.Status())
