@@ -27,22 +27,22 @@ type Middleware struct{ minify *minify.M }
 
 func init() {
 	caddy.RegisterModule(new(Middleware))
-	httpcaddyfile.RegisterHandlerDirective("minify", parseCaddyfileHandler)
+	httpcaddyfile.RegisterHandlerDirective("minify", setup)
 }
 
-func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+func setup(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	m := new(Middleware)
 	return m, m.UnmarshalCaddyfile(h.Dispenser)
 }
 
-func (*Middleware) CaddyModule() caddy.ModuleInfo {
+func (Middleware) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.minify",
 		New: func() caddy.Module { return new(Middleware) },
 	}
 }
 
-func (m *Middleware) Provision(_ caddy.Context) error {
+func (m *Middleware) Provision(caddy.Context) error {
 	m.minify = minify.New()
 
 	m.minify.AddFunc("text/html", html.Minify)
@@ -52,44 +52,36 @@ func (m *Middleware) Provision(_ caddy.Context) error {
 	return nil
 }
 
-var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+var pool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
-func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+func (m Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	// Get a buffer to hold the response body.
-	buf := bufPool.Get().(*bytes.Buffer)
+	buf := pool.Get().(*bytes.Buffer)
 	buf.Reset()
-	defer bufPool.Put(buf)
+	defer pool.Put(buf)
 
 	// Set up the response recorder.
-	shouldBuf := func(int, http.Header) bool { return true }
-	rec := caddyhttp.NewResponseRecorder(w, buf, shouldBuf)
+	rec := caddyhttp.NewResponseRecorder(w, buf,
+		func(int, http.Header) bool { return true })
 
 	// Collect the response from upstream.
 	if err := next.ServeHTTP(rec, r); err != nil {
 		return err
 	}
 
-	// Early-exit if the body isn't HTML.
-	mediaType := rec.Header().Get("Content-Type")
-	_, params, minifier := m.minify.Match(mediaType)
+	// Early-exit if the content type isn't a match.
+	_, params, minifier := m.minify.Match(rec.Header().Get("Content-Type"))
 	if minifier == nil {
 		return rec.WriteResponse()
 	}
 
 	// Minify the body.
-	var result bytes.Buffer
-	if err := minifier(m.minify, &result, buf, params); err != nil {
-		return err
-	}
-
-	// Write out the shorter body.
 	w.Header().Del("Content-Length")
 	w.WriteHeader(rec.Status())
-	_, err := w.Write(result.Bytes())
-	return err
+	return minifier(m.minify, w, buf, params)
 }
 
-func (*Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+func (Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // Consume directive name.
 
 	// There should be no more arguments.
